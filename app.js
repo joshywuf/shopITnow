@@ -42,11 +42,11 @@ function renderNav() {
      <button onclick="go('cart')">Cart <span class="count">${n}</span></button>` +
     (role === 'admin' ? `<button onclick="go('admin')">Admin</button>` : '') +
     (user
-      ? `<button onclick="logout()">Log out</button>`
+      ? `<button onclick="go('profile')">Profile</button><button onclick="logout()">Log out</button>`
       : `<button onclick="go('login')">Log in</button><button class="primary" onclick="go('signup')">Sign up</button>`);
 }
 function go(v) {
-  ({ shop: viewShop, cart: viewCart, login: () => viewAuth('login'), signup: () => viewAuth('signup'), admin: viewAdmin })[v]();
+  ({ shop: viewShop, cart: viewCart, login: () => viewAuth('login'), signup: () => viewAuth('signup'), admin: viewAdmin, profile: viewProfile })[v]();
   const m = $('#view'); m.classList.remove('enter'); void m.offsetWidth; m.classList.add('enter');
   window.scrollTo(0, 0);
 }
@@ -142,6 +142,8 @@ function viewCart() {
 }
 async function checkout() {
   if (!user) { toast('Log in to place your order'); return go('login'); }
+  const { data: pr } = await sb.from('profiles').select('verification').eq('id', user.id).maybeSingle();
+  if (role !== 'admin' && pr?.verification !== 'verified') { toast('Verify your profile before ordering'); return go('profile'); }
   const total = cart.reduce((s, i) => s + i.price * i.qty, 0);
   const items = cart.map(({ id, name, price, qty }) => ({ id, name, price, qty }));
   const { error } = await sb.from('orders').insert({ user_id: user.id, user_email: user.email, items, total });
@@ -155,11 +157,10 @@ async function viewAdmin() {
   await loadProducts();
   $('#view').innerHTML = `
     <div class="bar"><h1>Admin</h1></div>
-    <div class="tabs">
-      <button class="${adminTab === 'products' ? 'on' : ''}" onclick="adminTab='products';viewAdmin()">Products</button>
-      <button class="${adminTab === 'orders' ? 'on' : ''}" onclick="adminTab='orders';viewAdmin()">Orders</button>
-    </div><div id="adm"></div>`;
-  adminTab === 'products' ? adminProducts() : adminOrders();
+    <div class="tabs">${[['products', 'Products'], ['orders', 'Orders'], ['customers', 'Customers']].map(([k, l]) =>
+      `<button class="${adminTab === k ? 'on' : ''}" onclick="adminTab='${k}';viewAdmin()">${l}</button>`).join('')}</div>
+    <div id="adm"></div>`;
+  ({ products: adminProducts, orders: adminOrders, customers: adminCustomers })[adminTab]();
 }
 function adminProducts() {
   $('#adm').innerHTML = `
@@ -216,18 +217,89 @@ async function deleteProduct(id) {
 async function adminOrders() {
   const { data, error } = await sb.from('orders').select('*').order('created_at', { ascending: false });
   if (error) return toast(error.message);
-  $('#adm').innerHTML = `<div class="panel">${data.length ? data.map(o => `<div class="row">
+  $('#adm').innerHTML = `<div class="panel">${data.length ? data.map(o => `<div class="row" data-s="${esc(o.status)}">
     <div class="grow"><strong>#${o.id}</strong> · ${esc(o.user_email)}<br>
       <span class="stock">${new Date(o.created_at).toLocaleString()}</span><br>
       ${o.items.map(i => `${esc(i.name)} × ${Number(i.qty)}`).join(', ')}</div>
     <strong>${money(o.total)}</strong>
-    <select style="width:auto" onchange="setStatus(${o.id},this.value)">
-      ${['pending', 'paid', 'shipped', 'completed', 'cancelled'].map(s => `<option ${s === o.status ? 'selected' : ''}>${s}</option>`).join('')}
+    <select class="st" data-s="${esc(o.status)}" onchange="setStatus(${o.id},this)">
+      ${['pending', 'processing', 'paid', 'shipped', 'completed', 'cancelled'].map(s => `<option ${s === o.status ? 'selected' : ''}>${s}</option>`).join('')}
     </select></div>`).join('') : '<p class="empty">No orders yet.</p>'}</div>`;
 }
-async function setStatus(id, status) {
+async function setStatus(id, el) {
+  const status = el.value;
   const { error } = await sb.from('orders').update({ status }).eq('id', id);
-  toast(error ? error.message : 'Order updated');
+  if (error) { toast(error.message); return adminOrders(); }
+  el.dataset.s = status; el.closest('.row').dataset.s = status; toast('Order marked ' + status);
+}
+
+// ---------- admin: customers + verification ----------
+async function adminCustomers() {
+  const { data, error } = await sb.from('profiles').select('*').neq('role', 'admin').order('submitted_at', { ascending: false, nullsFirst: false });
+  if (error) return toast(error.message);
+  $('#adm').innerHTML = `<div class="panel">${data.length ? data.map(c => `<div class="row" data-s="${esc(c.verification)}">
+    <div class="grow"><strong>${esc(c.full_name || 'No name yet')}</strong> <span class="st" data-s="${esc(c.verification)}">${esc(c.verification)}</span><br>
+      <span class="stock">${esc(c.email)}${c.phone ? ' · ' + esc(c.phone) : ' · no phone'}</span>
+      ${c.address ? `<br>${esc(c.address)}` : ''}${c.id_number ? `<br>${esc(c.id_type)}: ${esc(c.id_number)}` : ''}</div>
+    <div>${c.id_photo ? `<button onclick="viewId('${esc(c.id_photo)}')">View ID photo</button> ` : ''}
+      ${c.submitted_at ? `<button class="primary" onclick="verify('${c.id}','verified')">Verify</button>
+      <button class="danger" onclick="verify('${c.id}','rejected')">Reject</button>` : '<span class="stock">Not submitted</span>'}</div>
+  </div>`).join('') : '<p class="empty">No customers yet.</p>'}</div>`;
+}
+async function verify(id, status) {
+  const { error } = await sb.rpc('set_verification', { p_user: id, p_status: status });
+  if (error) return toast(error.message);
+  toast('Marked ' + status); adminCustomers();
+}
+async function viewId(path) {
+  const { data, error } = await sb.storage.from('id-documents').createSignedUrl(path, 120);
+  if (error) return toast(error.message);
+  const d = document.createElement('div'); d.className = 'lightbox'; d.onclick = () => d.remove();
+  d.innerHTML = `<img src="${data.signedUrl}" alt="ID photo">`; document.body.append(d);
+}
+
+// ---------- customer profile ----------
+async function viewProfile() {
+  if (!user) { toast('Log in first'); return go('login'); }
+  const { data: p } = await sb.from('profiles').select('*').eq('id', user.id).maybeSingle();
+  const v = p?.verification || 'unverified';
+  const { data: orders } = await sb.from('orders').select('*').eq('user_id', user.id).order('created_at', { ascending: false });
+  const msg = { unverified: 'Fill in your details and send them to be verified.', pending: 'Your details are waiting for the shop to check them.',
+    verified: 'Your account is verified.', rejected: 'Your details were rejected. Update them and send again.' }[v];
+  $('#view').innerHTML = `
+    <div class="bar"><h1>My profile</h1><span class="st" data-s="${v}">${v}</span></div>
+    <form class="panel" onsubmit="saveProfile(event)">
+      <p class="stock">${msg}</p>
+      <label for="fn">Full name</label><input id="fn" required value="${esc(p?.full_name)}">
+      <label for="pe">Email</label><input id="pe" value="${esc(user.email)}" disabled>
+      <label for="pp">Phone (optional)</label><input id="pp" type="tel" value="${esc(p?.phone)}">
+      <label for="pa">Address</label><textarea id="pa" rows="2" required>${esc(p?.address)}</textarea>
+      <div class="two">
+        <div><label for="it">ID type</label><select id="it">${['National ID', "Driver's license", 'Passport', 'School ID', 'Other'].map(t => `<option ${t === p?.id_type ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+        <div><label for="in">ID number</label><input id="in" required value="${esc(p?.id_number)}"></div>
+      </div>
+      <label for="ip">ID photo${p?.id_photo ? ' (uploaded; choose a file only to replace it)' : ''}</label>
+      <input id="ip" type="file" accept="image/*" ${p?.id_photo ? '' : 'required'}>
+      <p><button class="primary">Send for verification</button></p>
+    </form>
+    <h2 style="margin:28px 0 12px">My orders</h2>
+    <div class="panel">${orders?.length ? orders.map(o => `<div class="row" data-s="${esc(o.status)}">
+      <div class="grow"><strong>Order #${o.id}</strong><br><span class="stock">${new Date(o.created_at).toLocaleDateString()} · ${o.items.map(i => `${esc(i.name)} × ${Number(i.qty)}`).join(', ')}</span></div>
+      <strong>${money(o.total)}</strong><span class="st" data-s="${esc(o.status)}">${esc(o.status)}</span></div>`).join('') : '<p class="empty">No orders yet.</p>'}</div>`;
+}
+async function saveProfile(e) {
+  e.preventDefault();
+  let photo = ''; const f = $('#ip').files[0];
+  if (f) {
+    const path = `${user.id}/${Date.now()}-${f.name.replace(/[^\w.-]/g, '_')}`;
+    const up = await sb.storage.from('id-documents').upload(path, f);
+    if (up.error) return toast(up.error.message);
+    photo = path;
+  }
+  const { error } = await sb.rpc('submit_profile', { p_name: $('#fn').value.trim(), p_address: $('#pa').value.trim(),
+    p_phone: $('#pp').value.trim(), p_id_type: $('#it').value, p_id_number: $('#in').value.trim(), p_id_photo: photo });
+  if (error) return toast(error.message);
+  toast('Sent for verification'); viewProfile();
 }
 
 init();

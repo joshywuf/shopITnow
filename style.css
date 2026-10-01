@@ -103,3 +103,19 @@ a{color:var(--accent)}
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms!important;animation-delay:0s!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
 }
+
+/* ---------- status colors (orders + verification) ---------- */
+[data-s=pending]{--c:#7c8aa0}
+[data-s=processing]{--c:#d98e04}
+[data-s=paid]{--c:#0d9488}
+[data-s=shipped]{--c:#3b82f6}
+[data-s=completed],[data-s=verified]{--c:#16a34a}
+[data-s=cancelled],[data-s=rejected]{--c:#e5484d}
+[data-s=unverified]{--c:#7c8aa0}
+.st{display:inline-block;width:auto;font-size:.85rem;font-weight:700;text-transform:capitalize;padding:4px 12px;border-radius:99px;
+  background:color-mix(in srgb,var(--c,#7c8aa0) 16%,var(--card));color:color-mix(in srgb,var(--c,#7c8aa0) 70%,var(--ink));
+  border:1px solid color-mix(in srgb,var(--c,#7c8aa0) 45%,transparent);transition:background .3s,color .3s,border-color .3s}
+.row[data-s]{border-left:4px solid var(--c);padding-left:12px;transition:border-color .4s}
+.lightbox{position:fixed;inset:0;background:rgba(10,15,30,.82);display:grid;place-items:center;z-index:20;cursor:zoom-out;animation:fade .25s both}
+.lightbox img{max-width:92vw;max-height:88vh;border-radius:12px;animation:rise .35s both}
+@keyframes fade{from{opacity:0}to{opacity:1}}
