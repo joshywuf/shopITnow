@@ -107,7 +107,10 @@ function drawGrid() {
         <p>${esc(p.description)}</p>
         <span class="price">${money(p.price)}</span>
         <span class="stock">${p.stock > 0 ? p.stock + ' in stock' : 'Out of stock'}</span>
-        <button class="primary" ${p.stock > 0 ? '' : 'disabled'} onclick="addToCart(${p.id})">Add to cart</button>
+        <div class="btns">
+          <button ${p.stock > 0 ? '' : 'disabled'} onclick="addToCart(${p.id})">Add to cart</button>
+          <button class="primary" ${p.stock > 0 ? '' : 'disabled'} onclick="buyNow(${p.id})">Buy now</button>
+        </div>
       </div>
     </article>`).join('') : '<p class="empty" style="grid-column:1/-1">No products found.</p>';
 }
@@ -120,13 +123,21 @@ function addToCart(id) {
   else cart.push({ id, name: p.name, price: p.price, image_url: p.image_url, qty: 1 });
   saveCart(); $('.count')?.classList.add('bump'); toast(`${p.name} added to cart`);
 }
+function buyNow(id) { addToCart(id); go('cart'); }
 function changeQty(id, d) {
   const i = cart.find(x => x.id === id); if (!i) return;
   i.qty += d; if (i.qty <= 0) cart = cart.filter(x => x.id !== id);
   saveCart(); viewCart();
 }
-function viewCart() {
+let myProfile = null;
+async function viewCart() {
+  myProfile = null;
+  if (user) {
+    const { data } = await sb.from('profiles').select('full_name,address,phone,verification').eq('id', user.id).maybeSingle();
+    myProfile = data;
+  }
   const total = cart.reduce((s, i) => s + i.price * i.qty, 0);
+  const hasAddr = !!myProfile?.address;
   $('#view').innerHTML = `<div class="bar"><h1>Your cart</h1></div>` + (cart.length ? `
     <div class="panel">
       ${cart.map(i => `<div class="row">
@@ -136,17 +147,32 @@ function viewCart() {
           <strong style="padding:0 10px">${i.qty}</strong>
           <button onclick="changeQty(${i.id},1)" aria-label="Add one">+</button></div>
         <strong>${money(i.price * i.qty)}</strong></div>`).join('')}
-      <div class="row"><h2 style="margin:0">Total ${money(total)}</h2>
-        <button class="primary" onclick="checkout()">Place order</button></div>
+      <div class="row"><h2 style="margin:0">Total ${money(total)}</h2></div>
+    </div>
+    <div class="panel" style="margin-top:18px">
+      <h2 style="margin-top:0">Delivery address</h2>
+      ${user ? `${hasAddr ? `<label class="opt"><input type="radio" name="addr" value="profile" checked onchange="toggleAddr()"><span>Use my profile address<br><span class="stock">${esc(myProfile.address)}</span></span></label>` : ''}
+        <label class="opt"><input type="radio" name="addr" value="new" ${hasAddr ? '' : 'checked'} onchange="toggleAddr()"><span>Use a different address</span></label>
+        <div id="newbox" ${hasAddr ? 'hidden' : ''}>
+          <label for="newaddr">Address</label><textarea id="newaddr" rows="2"></textarea>
+          <label for="newphone">Phone (optional)</label><input id="newphone" type="tel">
+        </div>` : '<p class="stock">Log in to choose where to deliver your order.</p>'}
+      <p><button class="primary" onclick="checkout()">Place order</button></p>
     </div>` : '<p class="empty">Your cart is empty. <a href="#" onclick="go(\'shop\');return false">Browse the shop</a></p>');
 }
+function toggleAddr() { $('#newbox').hidden = document.querySelector('input[name=addr]:checked').value !== 'new'; }
 async function checkout() {
   if (!user) { toast('Log in to place your order'); return go('login'); }
   const { data: pr } = await sb.from('profiles').select('verification').eq('id', user.id).maybeSingle();
   if (role !== 'admin' && pr?.verification !== 'verified') { toast('Verify your profile before ordering'); return go('profile'); }
+  const mode = document.querySelector('input[name=addr]:checked')?.value;
+  const ship_name = myProfile?.full_name || user.email;
+  const ship_address = mode === 'profile' ? myProfile?.address : $('#newaddr')?.value.trim();
+  const ship_phone = (mode === 'profile' ? myProfile?.phone : ($('#newphone')?.value.trim() || myProfile?.phone)) || null;
+  if (!ship_address) return toast('Add a delivery address');
   const total = cart.reduce((s, i) => s + i.price * i.qty, 0);
   const items = cart.map(({ id, name, price, qty }) => ({ id, name, price, qty }));
-  const { error } = await sb.from('orders').insert({ user_id: user.id, user_email: user.email, items, total });
+  const { error } = await sb.from('orders').insert({ user_id: user.id, user_email: user.email, ship_name, ship_address, ship_phone, items, total });
   if (error) return toast(error.message);
   cart = []; saveCart(); toast('Order placed. Thank you!'); go('shop');
 }
@@ -218,13 +244,22 @@ async function adminOrders() {
   const { data, error } = await sb.from('orders').select('*').order('created_at', { ascending: false });
   if (error) return toast(error.message);
   $('#adm').innerHTML = `<div class="panel">${data.length ? data.map(o => `<div class="row" data-s="${esc(o.status)}">
-    <div class="grow"><strong>#${o.id}</strong> · ${esc(o.user_email)}<br>
+    <div class="grow"><strong>#${o.id}</strong> · ${esc(o.ship_name || o.user_email)}<br>
+      <span class="stock">${esc(o.user_email)}${o.ship_phone ? ' · ' + esc(o.ship_phone) : ''}</span><br>
+      ${o.ship_address ? 'Deliver to: ' + esc(o.ship_address) + '<br>' : '<span class="stock">No address (older order)</span><br>'}
       <span class="stock">${new Date(o.created_at).toLocaleString()}</span><br>
       ${o.items.map(i => `${esc(i.name)} × ${Number(i.qty)}`).join(', ')}</div>
     <strong>${money(o.total)}</strong>
     <select class="st" data-s="${esc(o.status)}" onchange="setStatus(${o.id},this)">
       ${['pending', 'processing', 'paid', 'shipped', 'completed', 'cancelled'].map(s => `<option ${s === o.status ? 'selected' : ''}>${s}</option>`).join('')}
-    </select></div>`).join('') : '<p class="empty">No orders yet.</p>'}</div>`;
+    </select>
+    <button class="danger" onclick="deleteOrder(${o.id})">Remove</button></div>`).join('') : '<p class="empty">No orders yet.</p>'}</div>`;
+}
+async function deleteOrder(id) {
+  if (!confirm('Remove order #' + id + '? This cannot be undone.')) return;
+  const { data, error } = await sb.from('orders').delete().eq('id', id).select();
+  if (error || !data.length) return toast(error?.message || 'Could not remove. Run the new SQL update first.');
+  toast('Order removed'); adminOrders();
 }
 async function setStatus(id, el) {
   const status = el.value;
